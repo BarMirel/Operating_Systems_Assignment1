@@ -509,6 +509,100 @@ yield(void)
   release(&p->lock);
 }
 
+static void
+lock_proc_pair(struct proc *a, struct proc *b)
+{
+  if(a < b){
+    acquire(&a->lock);
+    acquire(&b->lock);
+  } else {
+    acquire(&b->lock);
+    acquire(&a->lock);
+  }
+}
+
+static void
+unlock_proc_pair(struct proc *a, struct proc *b)
+{
+  if(a < b){
+    release(&b->lock);
+    release(&a->lock);
+  } else {
+    release(&a->lock);
+    release(&b->lock);
+  }
+}
+
+int
+co_yield(int pid, int value)
+{
+  struct proc *p = myproc();
+
+  if(pid <= 0 || value <= 0 || pid == p->pid)
+    return -1;
+
+  for(;;){
+    struct proc *target = 0;
+
+    for(struct proc *it = proc; it < &proc[NPROC]; it++){
+      if(it->pid == pid){
+        target = it;
+        break;
+      }
+    }
+
+    if(target == 0)
+      return -1;
+
+    lock_proc_pair(p, target);
+
+    if(target->pid != pid || target->state == UNUSED || target->state == ZOMBIE || target->killed){
+      unlock_proc_pair(p, target);
+      return -1;
+    }
+
+    if(target->state == SLEEPING && (target->chan == target || target->chan == p)){
+      struct cpu *c = mycpu();
+
+      target->trapframe->a0 = value;
+      target->chan = 0;
+      target->state = RUNNING;
+
+      p->state = SLEEPING;
+      p->chan = p;
+
+      c->proc = target;
+      release(&p->lock);
+      swtch(&p->context, &target->context);
+      c->proc = p;
+
+      if(!holding(&p->lock))
+        acquire(&p->lock);
+      p->chan = 0;
+      value = p->trapframe->a0;
+      release(&p->lock);
+
+      if(holding(&target->lock))
+        release(&target->lock);
+
+      if(value < 0)
+        return -1;
+      return value;
+    }
+
+    // Target not ready yet; wait until it reaches co_yield.
+    p->chan = target;
+    p->state = SLEEPING;
+    release(&target->lock);
+    sched();
+    p->chan = 0;
+    release(&p->lock);
+
+    if(killed(p))
+      return -1;
+  }
+}
+
 // A fork child's very first scheduling by scheduler()
 // will swtch to forkret.
 void
